@@ -439,7 +439,7 @@ namespace rvd2foam {
                     register_face(vids, (int)ownerSeed, (int)j);
                     totalCuts++;
                 }
-                cell.swap(clipped);
+                std::swap(cell, clipped);
             }
 
             // Any remaining faces lying on the original tet boundary are domain boundary faces.

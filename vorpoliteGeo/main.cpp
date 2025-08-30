@@ -12,14 +12,77 @@
 #include <string>
 #include <cstdint>
 #include <algorithm>
+#include <type_traits>
 
 #include "meshData.h"
 #include "gmshReader.h"
-#include "foamWriter.h"     // used by the legacy --mode=tet path
-#include "convertRVD.h"     // new standalone RVD module (no geogram)
+#include "foamWriter.h"   // used by the legacy --mode=tet path
+#include "convertRVD.h"   // new standalone RVD module (no geogram)
 
+// ---------- small helpers ----------
 static std::string getArg(int argc, char** argv, int i, const std::string& dflt) {
     return (i < argc ? std::string(argv[i]) : dflt);
+}
+
+// Detect common tet layouts in your repo so we can read 4 indices safely.
+template <typename T, typename = void> struct has_index_op : std::false_type {};
+template <typename T>
+struct has_index_op<T, std::void_t<decltype(std::declval<const T&>()[0])>> : std::true_type {};
+
+template <typename T, typename = void> struct has_v_array : std::false_type {};
+template <typename T>
+struct has_v_array<T, std::void_t<decltype(std::declval<const T&>().v[0])>> : std::true_type {};
+
+template <typename T, typename = void> struct has_abcd : std::false_type {};
+template <typename T>
+struct has_abcd<T, std::void_t<
+    decltype(std::declval<const T&>().a),
+    decltype(std::declval<const T&>().b),
+    decltype(std::declval<const T&>().c),
+    decltype(std::declval<const T&>().d)>> : std::true_type {};
+
+template <typename T, typename = void> struct has_i0123 : std::false_type {};
+template <typename T>
+struct has_i0123<T, std::void_t<
+    decltype(std::declval<const T&>().i0),
+    decltype(std::declval<const T&>().i1),
+    decltype(std::declval<const T&>().i2),
+    decltype(std::declval<const T&>().i3)>> : std::true_type {};
+
+template <typename T, typename = void> struct has_n0123 : std::false_type {};
+template <typename T>
+struct has_n0123<T, std::void_t<
+    decltype(std::declval<const T&>().n0),
+    decltype(std::declval<const T&>().n1),
+    decltype(std::declval<const T&>().n2),
+    decltype(std::declval<const T&>().n3)>> : std::true_type {};
+
+// Generic accessor: fills out[4] with 0-based vertex ids from a tet record
+template <typename Tet>
+inline void getTet4(const Tet& t, uint32_t out[4]) {
+    if constexpr (has_index_op<Tet>::value) {
+        out[0] = uint32_t(t[0]); out[1] = uint32_t(t[1]);
+        out[2] = uint32_t(t[2]); out[3] = uint32_t(t[3]);
+    }
+    else if constexpr (has_v_array<Tet>::value) {
+        out[0] = uint32_t(t.v[0]); out[1] = uint32_t(t.v[1]);
+        out[2] = uint32_t(t.v[2]); out[3] = uint32_t(t.v[3]);
+    }
+    else if constexpr (has_abcd<Tet>::value) {
+        out[0] = uint32_t(t.a); out[1] = uint32_t(t.b);
+        out[2] = uint32_t(t.c); out[3] = uint32_t(t.d);
+    }
+    else if constexpr (has_i0123<Tet>::value) {
+        out[0] = uint32_t(t.i0); out[1] = uint32_t(t.i1);
+        out[2] = uint32_t(t.i2); out[3] = uint32_t(t.i3);
+    }
+    else if constexpr (has_n0123<Tet>::value) {
+        out[0] = uint32_t(t.n0); out[1] = uint32_t(t.n1);
+        out[2] = uint32_t(t.n2); out[3] = uint32_t(t.n3);
+    }
+    else {
+        static_assert(sizeof(Tet) == 0, "Unsupported tet record type: add a branch to getTet4()");
+    }
 }
 
 int main(int argc, char** argv) {
@@ -66,14 +129,12 @@ int main(int argc, char** argv) {
             pts.push_back(p.x); pts.push_back(p.y); pts.push_back(p.z);
         }
 
-        // Pack tets into uint32[4*M]
+        // Pack tets into uint32[4*M] via robust accessor
         std::vector<uint32_t> tetIdx; tetIdx.reserve(gmshData.tets.size() * 4);
         for (const auto& t : gmshData.tets) {
-            // assumes an indexable type (e.g., std::array<int,4>) with 0-based ids
-            tetIdx.push_back(static_cast<uint32_t>(t[0]));
-            tetIdx.push_back(static_cast<uint32_t>(t[1]));
-            tetIdx.push_back(static_cast<uint32_t>(t[2]));
-            tetIdx.push_back(static_cast<uint32_t>(t[3]));
+            uint32_t v[4]; getTet4(t, v);
+            tetIdx.push_back(v[0]); tetIdx.push_back(v[1]);
+            tetIdx.push_back(v[2]); tetIdx.push_back(v[3]);
         }
 
         // Build thin views for the RVD module
