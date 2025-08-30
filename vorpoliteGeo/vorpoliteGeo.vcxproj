@@ -24,6 +24,7 @@
     <ProjectGuid>{92246a5d-1766-421d-a8bd-7f3782d5a02c}</ProjectGuid>
     <RootNamespace>vorpoliteGeo</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>meshSandbox</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
