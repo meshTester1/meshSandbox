@@ -1,0 +1,552 @@
+// Tetrahedral mesh -> OpenFOAM polyMesh converter
+// Build: MSVC x64 or GCC
+// Supports: Gmsh version 1 legacy format only
+
+#define _CRT_SECURE_NO_WARNINGS
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <array>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <algorithm>
+
+#ifdef _WIN32
+#  include <direct.h>
+#else
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
+
+// ---------- tiny math / hashing ----------
+struct Vec3 { double x, y, z; };
+
+struct Vec3Key {
+    long long xi, yi, zi;
+    bool operator==(const Vec3Key& o) const { return xi == o.xi && yi == o.yi && zi == o.zi; }
+};
+struct Vec3KeyHash {
+    size_t operator()(const Vec3Key& k) const {
+        size_t h = 1469598103934665603ull;
+        auto mix = [&](long long v) { h ^= (size_t)v; h *= 1099511628211ull; };
+        mix(k.xi); mix(k.yi); mix(k.zi); return h;
+    }
+};
+static inline Vec3Key quantize(const Vec3& p, double q = 1e-10) {
+    return Vec3Key{ (long long)std::llround(p.x / q),
+                    (long long)std::llround(p.y / q),
+                    (long long)std::llround(p.z / q) };
+}
+
+// ---------- Gmsh v1 ASCII format only ----------
+struct Triangle { int v[3]; };
+struct Tet { int v[4]; };
+struct GmshData {
+    std::vector<Vec3> nodes;
+    std::vector<Triangle> tris; // optional boundary
+    std::vector<Tet> tets;      // volume tets (required)
+};
+
+static bool starts_with(const std::string& s, const char* tag) {
+    size_t n = std::strlen(tag);
+    return s.size() >= n && std::equal(tag, tag + n, s.begin());
+}
+
+static bool read_gmsh_v1_ascii(const std::string& path, GmshData& out) {
+    std::ifstream in(path);
+    if (!in) {
+        std::cerr << "Cannot open " << path << std::endl;
+        return false;
+    }
+
+    std::string line;
+    std::map<int, int> id2idx;
+
+    auto read_nodes = [&](int n) -> bool {
+        out.nodes.resize(n);
+        id2idx.clear();
+        for (int i = 0; i < n; ++i) {
+            if (!std::getline(in, line)) {
+                std::cerr << "Failed to read node " << i << std::endl;
+                return false;
+            }
+            std::istringstream iss(line);
+            int id;
+            double x, y, z;
+            if (!(iss >> id >> x >> y >> z)) {
+                std::cerr << "Failed to parse node line: " << line << std::endl;
+                return false;
+            }
+            int idx = (int)id2idx.size();
+            id2idx[id] = idx;
+            out.nodes[idx] = { x, y, z };
+        }
+        return true;
+        };
+
+    auto read_elements = [&](int m) -> bool {
+        for (int i = 0; i < m; ++i) {
+            if (!std::getline(in, line)) {
+                std::cerr << "Failed to read element " << i << std::endl;
+                return false;
+            }
+            std::istringstream iss(line);
+            std::vector<long long> t;
+            long long v;
+            while (iss >> v) t.push_back(v);
+
+            if (t.size() < 3) continue;
+            int type = (int)t[1]; // element type
+
+            // Triangle (type 2)
+            if (type == 2 && t.size() >= 6) {
+                int a = (int)t[t.size() - 3], b = (int)t[t.size() - 2], c = (int)t[t.size() - 1];
+                Triangle T;
+                T.v[0] = id2idx.count(a) ? id2idx[a] : a - 1;
+                T.v[1] = id2idx.count(b) ? id2idx[b] : b - 1;
+                T.v[2] = id2idx.count(c) ? id2idx[c] : c - 1;
+
+                // Validate indices
+                if (T.v[0] >= 0 && T.v[0] < (int)out.nodes.size() &&
+                    T.v[1] >= 0 && T.v[1] < (int)out.nodes.size() &&
+                    T.v[2] >= 0 && T.v[2] < (int)out.nodes.size()) {
+                    out.tris.push_back(T);
+                }
+            }
+            // Tetrahedron (type 4)
+            else if (type == 4 && t.size() >= 7) {
+                int a = (int)t[t.size() - 4], b = (int)t[t.size() - 3],
+                    c = (int)t[t.size() - 2], d = (int)t[t.size() - 1];
+                Tet T;
+                T.v[0] = id2idx.count(a) ? id2idx[a] : a - 1;
+                T.v[1] = id2idx.count(b) ? id2idx[b] : b - 1;
+                T.v[2] = id2idx.count(c) ? id2idx[c] : c - 1;
+                T.v[3] = id2idx.count(d) ? id2idx[d] : d - 1;
+
+                // Validate indices
+                if (T.v[0] >= 0 && T.v[0] < (int)out.nodes.size() &&
+                    T.v[1] >= 0 && T.v[1] < (int)out.nodes.size() &&
+                    T.v[2] >= 0 && T.v[2] < (int)out.nodes.size() &&
+                    T.v[3] >= 0 && T.v[3] < (int)out.nodes.size()) {
+                    out.tets.push_back(T);
+                }
+            }
+        }
+        return true;
+        };
+
+    // Parse Gmsh v1 format only
+    while (std::getline(in, line)) {
+        if (starts_with(line, "$NOD")) {
+            if (!std::getline(in, line)) {
+                std::cerr << "Failed to read node count" << std::endl;
+                return false;
+            }
+            int n = 0;
+            { std::istringstream iss(line); iss >> n; }
+            if (n <= 0) {
+                std::cerr << "Invalid node count: " << n << std::endl;
+                return false;
+            }
+            if (!read_nodes(n)) return false;
+            if (!std::getline(in, line)) return false; // $ENDNOD
+        }
+        else if (starts_with(line, "$ELM")) {
+            if (!std::getline(in, line)) {
+                std::cerr << "Failed to read element count" << std::endl;
+                return false;
+            }
+            int m = 0;
+            { std::istringstream iss(line); iss >> m; }
+            if (m <= 0) {
+                std::cerr << "Invalid element count: " << m << std::endl;
+                return false;
+            }
+            if (!read_elements(m)) return false;
+            if (!std::getline(in, line)) return false; // $ENDELM
+        }
+    }
+
+    if (out.nodes.empty() || out.tets.empty()) {
+        std::cerr << "Parsed nodes=" << out.nodes.size()
+            << ", tets=" << out.tets.size()
+            << ", tris=" << out.tris.size() << std::endl;
+        std::cerr << "ERROR: Need both nodes and tetrahedra for mesh conversion" << std::endl;
+        return false;
+    }
+
+    // Derive boundary triangles if not present
+    if (out.tris.empty()) {
+        std::cout << "No boundary triangles found, deriving from tetrahedra..." << std::endl;
+        auto key3 = [&](int a, int b, int c) {
+            std::array<int, 3> s{ a, b, c };
+            std::sort(s.begin(), s.end());
+            return s;
+            };
+        std::map<std::array<int, 3>, int> cnt;
+        auto add = [&](int a, int b, int c) { cnt[key3(a, b, c)]++; };
+
+        for (const auto& T : out.tets) {
+            add(T.v[0], T.v[1], T.v[2]);
+            add(T.v[0], T.v[1], T.v[3]);
+            add(T.v[0], T.v[2], T.v[3]);
+            add(T.v[1], T.v[2], T.v[3]);
+        }
+
+        for (const auto& kv : cnt) {
+            if (kv.second == 1) { // boundary face
+                out.tris.push_back(Triangle{ {kv.first[0], kv.first[1], kv.first[2]} });
+            }
+        }
+        std::cout << "Derived " << out.tris.size() << " boundary triangles" << std::endl;
+    }
+    return true;
+}
+
+// ---------- Per-cell polyhedron (skeleton for future polyhedral support) ----------
+struct PolyCell {
+    std::vector<Vec3> verts;
+    std::vector<std::vector<int>> faces; // indices into verts
+};
+
+struct PolyMeshOut {
+    std::vector<Vec3> points;
+    std::vector<std::vector<int>> faces;     // global point indices
+    std::vector<int> owner;                  // faces.size()
+    std::vector<int> neighbour;              // nInternalFaces
+    std::vector<std::vector<int>> cellFaces; // per cell -> list of global face ids
+    int nInternalFaces = 0;
+};
+
+// Convert tetrahedral mesh directly to polyhedral cells
+static void convert_tets_to_polycells(const GmshData& g, std::vector<PolyCell>& cells) {
+    cells.resize(g.tets.size());
+
+    for (size_t t = 0; t < g.tets.size(); ++t) {
+        const Tet& tet = g.tets[t];
+        PolyCell& cell = cells[t];
+
+        // Add the 4 vertices of the tetrahedron
+        cell.verts.resize(4);
+        cell.verts[0] = g.nodes[tet.v[0]];
+        cell.verts[1] = g.nodes[tet.v[1]];
+        cell.verts[2] = g.nodes[tet.v[2]];
+        cell.verts[3] = g.nodes[tet.v[3]];
+
+        // Add the 4 triangular faces of the tetrahedron
+        // Face 0: vertices 0,1,2 (opposite to vertex 3)
+        // Face 1: vertices 0,1,3 (opposite to vertex 2)
+        // Face 2: vertices 0,2,3 (opposite to vertex 1)
+        // Face 3: vertices 1,2,3 (opposite to vertex 0)
+        cell.faces.resize(4);
+        cell.faces[0] = { 0, 1, 2 }; // face opposite to vertex 3
+        cell.faces[1] = { 0, 1, 3 }; // face opposite to vertex 2
+        cell.faces[2] = { 0, 2, 3 }; // face opposite to vertex 1
+        cell.faces[3] = { 1, 2, 3 }; // face opposite to vertex 0
+    }
+
+    std::cout << "Converted " << g.tets.size() << " tetrahedra to polyhedral cells" << std::endl;
+}
+
+// Build OpenFOAM topology (internal faces first)
+static void build_openfoam_topology(const std::vector<PolyCell>& cells, PolyMeshOut& out) {
+    out = PolyMeshOut();
+
+    std::unordered_map<Vec3Key, int, Vec3KeyHash> gpmap;
+    auto add_point = [&](const Vec3& v)->int {
+        auto k = quantize(v);
+        auto it = gpmap.find(k);
+        if (it != gpmap.end()) return it->second;
+        int id = (int)out.points.size();
+        out.points.push_back(v);
+        gpmap.emplace(k, id);
+        return id;
+        };
+
+    struct FaceKeyHash {
+        size_t operator()(const std::vector<int>& f) const {
+            size_t h = 1469598103934665603ull;
+            for (int v : f) {
+                h ^= (size_t)v;
+                h *= 1099511628211ull;
+            }
+            return h;
+        }
+    };
+
+    struct FaceKeyEq {
+        bool operator()(const std::vector<int>& a, const std::vector<int>& b) const {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
+        }
+    };
+
+    struct PendingFace {
+        std::vector<int> verts;
+        int ownerCell = -1;
+    };
+
+    std::unordered_map<std::vector<int>, PendingFace, FaceKeyHash, FaceKeyEq> pending;
+
+    out.cellFaces.resize(cells.size());
+    auto canonical_sorted = [](std::vector<int> f) {
+        std::sort(f.begin(), f.end());
+        return f;
+        };
+
+    std::vector<std::vector<int>> internalFaces;
+    std::vector<int> internalOwner, internalNeigh;
+
+    // Process all cells and their faces
+    for (int c = 0; c < (int)cells.size(); ++c) {
+        const auto& cell = cells[c];
+        if (cell.faces.empty() || cell.verts.empty()) {
+            continue; // Skip empty cells
+        }
+
+        for (const auto& fLocal : cell.faces) {
+            std::vector<int> fGlob;
+            fGlob.reserve(fLocal.size());
+
+            for (int li : fLocal) {
+                if (li >= 0 && li < (int)cell.verts.size()) {
+                    fGlob.push_back(add_point(cell.verts[li]));
+                }
+            }
+
+            if ((int)fGlob.size() < 3) continue; // Skip degenerate faces
+
+            auto key = canonical_sorted(fGlob);
+            auto it = pending.find(key);
+
+            if (it == pending.end()) {
+                // First time seeing this face
+                pending.emplace(key, PendingFace{ fGlob, c });
+            }
+            else {
+                // Second time - this is an internal face
+                internalFaces.push_back(it->second.verts);
+                internalOwner.push_back(it->second.ownerCell);
+                internalNeigh.push_back(c);
+
+                int faceId = (int)internalFaces.size() - 1;
+                out.cellFaces[it->second.ownerCell].push_back(faceId);
+                out.cellFaces[c].push_back(faceId);
+
+                pending.erase(it);
+            }
+        }
+    }
+
+    // Set up internal faces
+    out.nInternalFaces = (int)internalFaces.size();
+    out.faces = std::move(internalFaces);
+    out.owner = std::move(internalOwner);
+    out.neighbour = std::move(internalNeigh);
+
+    // Add boundary faces
+    int nextFaceId = out.nInternalFaces;
+    for (auto& kv : pending) {
+        auto& pf = kv.second;
+        int faceId = nextFaceId++;
+        out.faces.push_back(pf.verts);
+        out.owner.push_back(pf.ownerCell);
+        out.cellFaces[pf.ownerCell].push_back(faceId);
+    }
+
+    std::cout << "OpenFOAM topology: " << out.points.size() << " points, "
+        << out.faces.size() << " faces (" << out.nInternalFaces << " internal, "
+        << (out.faces.size() - out.nInternalFaces) << " boundary)" << std::endl;
+}
+
+// ---------- Write OpenFOAM polyMesh ----------
+static void write_FoamHeader(std::ofstream& f, const std::string& cls, const std::string& obj) {
+    f << "FoamFile\n{\n"
+        << "    version     2.0;\n"
+        << "    format      ascii;\n"
+        << "    class       " << cls << ";\n"
+        << "    location    \"polyMesh\";\n"
+        << "    object      " << obj << ";\n"
+        << "}\n\n";
+}
+
+static bool write_points(const std::string& dir, const std::vector<Vec3>& pts) {
+    std::ofstream f(dir + "/points");
+    if (!f) {
+        std::cerr << "Failed to create points file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "vectorField", "points");
+    f << pts.size() << "\n(\n";
+    f.setf(std::ios::scientific);
+    for (const auto& p : pts) {
+        f << " (" << p.x << " " << p.y << " " << p.z << ")\n";
+    }
+    f << ")\n";
+    return true;
+}
+
+static bool write_faces(const std::string& dir, const std::vector<std::vector<int>>& faces) {
+    std::ofstream f(dir + "/faces");
+    if (!f) {
+        std::cerr << "Failed to create faces file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "faceList", "faces");
+    f << faces.size() << "\n(\n";
+    for (const auto& fa : faces) {
+        f << " " << fa.size() << "(";
+        for (size_t i = 0; i < fa.size(); ++i) {
+            f << (i ? " " : "") << fa[i];
+        }
+        f << ")\n";
+    }
+    f << ")\n";
+    return true;
+}
+
+static bool write_owner(const std::string& dir, const std::vector<int>& owner) {
+    std::ofstream f(dir + "/owner");
+    if (!f) {
+        std::cerr << "Failed to create owner file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "labelList", "owner");
+    f << owner.size() << "\n(\n";
+    for (int v : owner) {
+        f << " " << v << "\n";
+    }
+    f << ")\n";
+    return true;
+}
+
+static bool write_neighbour(const std::string& dir, const std::vector<int>& neigh) {
+    std::ofstream f(dir + "/neighbour");
+    if (!f) {
+        std::cerr << "Failed to create neighbour file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "labelList", "neighbour");
+    f << neigh.size() << "\n(\n";
+    for (int v : neigh) {
+        f << " " << v << "\n";
+    }
+    f << ")\n";
+    return true;
+}
+
+static bool write_cells(const std::string& dir, const std::vector<std::vector<int>>& cellFaces) {
+    std::ofstream f(dir + "/cells");
+    if (!f) {
+        std::cerr << "Failed to create cells file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "cellList", "cells");
+    f << cellFaces.size() << "\n(\n";
+    for (const auto& fl : cellFaces) {
+        f << " " << fl.size() << "(";
+        for (size_t i = 0; i < fl.size(); ++i) {
+            f << (i ? " " : "") << fl[i];
+        }
+        f << ")\n";
+    }
+    f << ")\n";
+    return true;
+}
+
+static bool write_boundary_singlePatch(const std::string& dir, int nFacesTotal, int nInternalFaces) {
+    std::ofstream f(dir + "/boundary");
+    if (!f) {
+        std::cerr << "Failed to create boundary file" << std::endl;
+        return false;
+    }
+    write_FoamHeader(f, "polyBoundaryMesh", "boundary");
+    int nBoundaryFaces = nFacesTotal - nInternalFaces;
+    f << "1\n(\n"
+        << " boundary\n{\n"
+        << "     type            wall;\n"
+        << "     nFaces          " << nBoundaryFaces << ";\n"
+        << "     startFace       " << nInternalFaces << ";\n"
+        << "}\n)\n";
+    return true;
+}
+
+// ---------- main ----------
+int main(int argc, char** argv) {
+    const std::string mshPath = (argc >= 2 ? argv[1] : "mediumCube.msh");
+
+    std::cout << "Tetrahedral mesh to OpenFOAM polyMesh converter" << std::endl;
+    std::cout << "Input file: " << mshPath << std::endl;
+
+    // 1) Read Gmsh v1 format only
+    GmshData g;
+    if (!read_gmsh_v1_ascii(mshPath, g)) {
+        std::cerr << "Failed to parse Gmsh mesh" << std::endl;
+        return 1;
+    }
+    std::cout << "Read: " << g.nodes.size() << " nodes, " << g.tets.size()
+        << " tets, " << g.tris.size() << " boundary tris" << std::endl;
+
+    // 2) Convert tetrahedra directly to polyhedral cells
+    std::vector<PolyCell> cells;
+    convert_tets_to_polycells(g, cells);
+
+    // 3) Validate cells
+    size_t valid = 0;
+    for (const auto& c : cells) {
+        if (!c.faces.empty() && !c.verts.empty()) ++valid;
+    }
+
+    if (valid == 0) {
+        std::cerr << "ERROR: No valid polyhedral cells generated" << std::endl;
+        std::cerr << "Check that input mesh contains valid tetrahedra" << std::endl;
+        return 1;
+    }
+    std::cout << "Valid cells: " << valid << " / " << cells.size() << std::endl;
+
+    // 4) Build OpenFOAM topology and write
+    PolyMeshOut foam;
+    build_openfoam_topology(cells, foam);
+
+    const std::string polyDir = "polyMesh";
+#ifdef _WIN32
+    _mkdir(polyDir.c_str());
+#else
+    mkdir(polyDir.c_str(), 0755);
+#endif
+
+    std::cout << "Writing OpenFOAM polyMesh files..." << std::endl;
+
+    bool ok = true;
+    ok = ok && write_points(polyDir, foam.points);
+    ok = ok && write_faces(polyDir, foam.faces);
+    ok = ok && write_owner(polyDir, foam.owner);
+    ok = ok && write_neighbour(polyDir, foam.neighbour);
+    ok = ok && write_cells(polyDir, foam.cellFaces);
+    ok = ok && write_boundary_singlePatch(polyDir, (int)foam.faces.size(), foam.nInternalFaces);
+
+    if (!ok) {
+        std::cerr << "Failed writing OpenFOAM polyMesh files" << std::endl;
+        return 1;
+    }
+
+    std::cout << "Tetrahedral mesh to OpenFOAM conversion completed successfully" << std::endl;
+    std::cout << "Output polyMesh: points=" << foam.points.size()
+        << ", faces=" << foam.faces.size()
+        << " (internal=" << foam.nInternalFaces
+        << ", boundary=" << (foam.faces.size() - foam.nInternalFaces)
+        << "), cells=" << foam.cellFaces.size() << std::endl;
+
+    return 0;
+}
