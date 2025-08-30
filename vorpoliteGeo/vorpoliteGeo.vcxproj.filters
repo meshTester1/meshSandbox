@@ -24,6 +24,9 @@
     <ClCompile Include="gmshReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="convertRVD.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="meshData.h">
@@ -33,6 +36,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="foamWriter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="convertRVD.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
