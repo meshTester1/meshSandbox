@@ -1,4 +1,5 @@
-#pragma once
+﻿#pragma once
+
 #include <vector>
 #include <array>
 #include <string>
@@ -6,53 +7,53 @@
 
 namespace rvd2foam {
 
-    // ---------- Inputs ----------
+    // Input tetrahedral mesh view (shallow wrapper around raw arrays)
     struct TetMeshView {
-        // points: x0,y0,z0, x1,y1,z1, ...
-        const double* points = nullptr;   // required
-        std::size_t   numPoints = 0;      // number of 3D points (not *3)
-        // tets: v0,v1,v2,v3 (0-based indices)
-        const uint32_t* tets = nullptr;   // required
-        std::size_t     numTets = 0;      // number of tetrahedra
+        const double* points;      // xyz coordinates: points[3*i+0], points[3*i+1], points[3*i+2]
+        std::size_t numPoints;
+        const std::uint32_t* tets; // tetrahedra: tets[4*j+0], tets[4*j+1], tets[4*j+2], tets[4*j+3] (0-based indices)
+        std::size_t numTets;
     };
 
+    // Optional seed points for RVD (if nullptr, uses tet centroids)
     struct SeedCloud {
-        // seeds: x0,y0,z0, x1,y1,z1, ... (optional)
-        const double* xyz = nullptr;
-        std::size_t   count = 0;
+        const double* xyz;         // xyz coordinates: xyz[3*i+0], xyz[3*i+1], xyz[3*i+2]
+        std::size_t count;
     };
 
-    // ---------- Output ----------
+    // Output OpenFOAM polyMesh structure
     struct OpenFOAMPolyMesh {
-        std::vector<std::array<double, 3>> points;        // global points
-        std::vector<std::vector<int>>     faces;         // polygonal faces (vertex indices)
-        std::vector<int>                  owner;         // size = faces.size()
-        std::vector<int>                  neighbour;     // size = #internal faces (prefix)
-        // Single default boundary patch (we can split later)
-        std::string boundaryName = "defaultFaces";
-        std::string boundaryType = "patch";
+        std::vector<std::array<double, 3>> points;      // vertex coordinates
+        std::vector<std::vector<int>> faces;            // faces as vertex indices
+        std::vector<int> owner;                         // face owner cell
+        std::vector<int> neighbour;                     // face neighbour cell (internal faces only)
+
+        // Boundary patch info (single patch by default)
+        std::string boundaryName = "walls";
+        std::string boundaryType = "wall";
     };
 
-    // Build RVD polyhedra and convert to OpenFOAM lists (no external deps).
-    // - If 'seeds' is empty, uses one seed per tet (tet centroid).
-    // - Returns true on success. 'verbose' prints progress.
+    // Main conversion function: tetrahedral mesh → RVD polyhedral cells
     bool convertTetToRVDPolyMesh(
         const TetMeshView& tet,
         const SeedCloud& seeds,
-        OpenFOAMPolyMesh& outMesh,
-        bool verbose = false);
+        OpenFOAMPolyMesh& out,
+        bool verbose = false
+    );
 
-    // Minimal ASCII writer for OpenFOAM polyMesh (use if you don't call your foamWriter).
+    // Write OpenFOAM polyMesh files (points, faces, owner, neighbour, boundary)
     bool writeOpenFOAMPolyMesh(
-        const OpenFOAMPolyMesh& m,
-        const std::string& casePolyMeshDir,   // e.g. ".../constant/polyMesh"
-        bool verbose = false);
+        const OpenFOAMPolyMesh& mesh,
+        const std::string& polyMeshDir,
+        bool verbose = false
+    );
 
-    // One-shot convenience: compute + write polyMesh.
+    // High-level convenience function: tet mesh → OpenFOAM files
     bool convertTetToOpenFOAM(
         const TetMeshView& tet,
         const SeedCloud& seeds,
         const std::string& casePolyMeshDir,
-        bool verbose = false);
+        bool verbose = false
+    );
 
 } // namespace rvd2foam

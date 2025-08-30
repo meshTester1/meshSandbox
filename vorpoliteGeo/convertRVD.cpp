@@ -11,10 +11,9 @@
 #include <set>
 #include <sstream>
 #include <string>
-#include <unordered_map>
-#include <utility>
+#include <utility>  
+#include <cstdlib>   
 #include <iostream>
-#include <vector>
 
 namespace rvd2foam {
 
@@ -31,7 +30,7 @@ namespace rvd2foam {
     }
     static inline double v_norm(V3 a) { return std::sqrt(v_dot(a, a)); }
 
-    struct Plane { V3 n; double c; }; // half-space: n·x <= c
+    struct Plane { V3 n; double c; };
 
     static inline double signed_dist(const Plane& P, V3 x) {
         return v_dot(P.n, x) - P.c;
@@ -46,14 +45,19 @@ namespace rvd2foam {
     }
 
     static inline V3 poly_centroid(const std::vector<V3>& poly) {
-        V3 c{ 0,0,0 }; if (poly.empty()) return c;
-        for (auto& p : poly) { c = v_add(c, p); }
+        V3 c = { 0,0,0 };
+        if (poly.empty()) return c;
+        for (size_t i = 0; i < poly.size(); ++i) {
+            c = v_add(c, poly[i]);
+        }
         return v_scale(c, 1.0 / double(poly.size()));
     }
 
     static inline V3 newell_normal(const std::vector<V3>& P) {
-        double nx = 0, ny = 0, nz = 0; size_t n = P.size(); if (n < 3) return { 0,0,0 };
-        for (size_t i = 0;i < n;i++) {
+        double nx = 0, ny = 0, nz = 0;
+        size_t n = P.size();
+        if (n < 3) return { 0,0,0 };
+        for (size_t i = 0; i < n; i++) {
             const V3& a = P[i];
             const V3& b = P[(i + 1) % n];
             nx += (a.y - b.y) * (a.z + b.z);
@@ -66,35 +70,74 @@ namespace rvd2foam {
     // =========================== polyhedron struct ===========================
 
     struct Poly3 {
-        std::vector<V3> V;                // vertices
-        std::vector<std::vector<int>> F;  // faces as CCW vertex indices (arbitrary start)
-        // (We will fix orientation later against owner centroids)
+        std::vector<V3> V;
+        std::vector<std::vector<int>> F;
     };
 
     static Poly3 make_tet_poly(const V3& p0, const V3& p1, const V3& p2, const V3& p3) {
         Poly3 P;
-        P.V = { p0,p1,p2,p3 };
-        // 4 faces: opposite each vertex
-        // We'll use consistent vertex cycles; orientation will be corrected later.
-        P.F.push_back({ 0,2,1 }); // opp v3
-        P.F.push_back({ 0,1,3 }); // opp v2
-        P.F.push_back({ 1,2,3 }); // opp v0
-        P.F.push_back({ 2,0,3 }); // opp v1
+        P.V.push_back(p0);
+        P.V.push_back(p1);
+        P.V.push_back(p2);
+        P.V.push_back(p3);
+
+        std::vector<int> f0, f1, f2, f3;
+        f0.push_back(0); f0.push_back(2); f0.push_back(1);
+        f1.push_back(0); f1.push_back(1); f1.push_back(3);
+        f2.push_back(1); f2.push_back(2); f2.push_back(3);
+        f3.push_back(2); f3.push_back(0); f3.push_back(3);
+
+        P.F.push_back(f0);
+        P.F.push_back(f1);
+        P.F.push_back(f2);
+        P.F.push_back(f3);
         return P;
     }
 
-    // Clip a polygon by plane n·x <= c (3D; polygon lies in some plane).
-    // Sutherland–Hodgman generalization in 3D (in/out test by signed distance).
+    // Simple vertex key using only basic types
+    struct VKey {
+        long long x, y, z;
+        bool operator<(const VKey& other) const {
+            if (x != other.x) return x < other.x;
+            if (y != other.y) return y < other.y;
+            return z < other.z;
+        }
+    };
+
+    static VKey make_vertex_key(const V3& a, double eps) {
+        const double s = 1.0 / eps;
+        VKey key;
+        key.x = static_cast<long long>(std::llround(a.x * s));
+        key.y = static_cast<long long>(std::llround(a.y * s));
+        key.z = static_cast<long long>(std::llround(a.z * s));
+        return key;
+    }
+
+    static bool point_inside_plane(const V3& q, const Plane& P, double eps) {
+        return signed_dist(P, q) <= eps;
+    }
+
+    static bool face_is_degenerate(const std::vector<int>& f, const std::vector<V3>& vertices) {
+        if (f.size() < 3) return true;
+        V3 a = vertices[f[0]];
+        V3 b = vertices[f[1]];
+        V3 c = vertices[f[2]];
+        return v_norm(tri_normal(a, b, c)) < 1e-18;
+    }
+
+    // Clip a polygon by plane n·x <= c
     static std::vector<V3> clip_polygon(const std::vector<V3>& poly, const Plane& P, double eps) {
-        std::vector<V3> out; if (poly.empty()) return out;
-        auto inside = [&](const V3& q) { return signed_dist(P, q) <= eps; };
+        std::vector<V3> out;
+        if (poly.empty()) return out;
+
         V3 S = poly.back();
-        bool Sin = inside(S);
-        for (const V3& E : poly) {
-            bool Ein = inside(E);
+        bool Sin = point_inside_plane(S, P, eps);
+
+        for (size_t i = 0; i < poly.size(); ++i) {
+            const V3& E = poly[i];
+            bool Ein = point_inside_plane(E, P, eps);
             if (Ein) {
                 if (!Sin) {
-                    // S->E crosses plane: add intersection
                     V3 d = v_sub(E, S);
                     double denom = v_dot(P.n, d);
                     double t = (P.c - v_dot(P.n, S)) / (denom == 0 ? 1e-30 : denom);
@@ -104,7 +147,6 @@ namespace rvd2foam {
                 out.push_back(E);
             }
             else if (Sin) {
-                // leaving: add intersection
                 V3 d = v_sub(E, S);
                 double denom = v_dot(P.n, d);
                 double t = (P.c - v_dot(P.n, S)) / (denom == 0 ? 1e-30 : denom);
@@ -113,10 +155,13 @@ namespace rvd2foam {
             }
             S = E; Sin = Ein;
         }
-        // collapse nearly-duplicate consecutive vertices
+
         std::vector<V3> comp;
-        for (const auto& q : out) {
-            if (comp.empty() || v_norm(v_sub(q, comp.back())) > eps) comp.push_back(q);
+        for (size_t i = 0; i < out.size(); ++i) {
+            const V3& q = out[i];
+            if (comp.empty() || v_norm(v_sub(q, comp.back())) > eps) {
+                comp.push_back(q);
+            }
         }
         if (comp.size() >= 3 && v_norm(v_sub(comp.front(), comp.back())) <= eps) {
             comp.back() = comp.front();
@@ -125,50 +170,49 @@ namespace rvd2foam {
         return comp;
     }
 
-    // Clip a convex polyhedron P by plane n·x <= c.
-    // Returns new convex poly + the new "cut face" polygon (if clipping occurred).
     static Poly3 clip_polyhedron(const Poly3& Pin, const Plane& P, double eps, std::vector<V3>* outCutPolygon = nullptr) {
         Poly3 Q;
         std::vector<V3> cutLoopAccum;
 
-        // Clip each face polygon
-        for (const auto& face : Pin.F) {
-            std::vector<V3> poly; poly.reserve(face.size());
-            for (int vi : face) poly.push_back(Pin.V[std::size_t(vi)]);
-            auto clipped = clip_polygon(poly, P, eps);
-            if (clipped.size() >= 3) {
-                // store new face; indices will be remapped after vertex weld
-                int base = int(Q.V.size());
-                for (const auto& v : clipped) Q.V.push_back(v);
-                std::vector<int> idx(clipped.size());
-                for (size_t k = 0;k < clipped.size();++k) idx[k] = base + int(k);
-                Q.F.push_back(std::move(idx));
+        for (size_t fi = 0; fi < Pin.F.size(); ++fi) {
+            const std::vector<int>& face = Pin.F[fi];
+            std::vector<V3> poly;
+            poly.reserve(face.size());
+            for (size_t i = 0; i < face.size(); ++i) {
+                poly.push_back(Pin.V[face[i]]);
             }
 
-            // Collect intersection segments endpoints to reconstruct the new cut face.
-            // We approximate by collecting all points that lie (within eps) on the plane.
-            for (const auto& v : clipped) {
-                if (std::fabs(signed_dist(P, v)) <= 2 * eps) cutLoopAccum.push_back(v);
+            std::vector<V3> clipped = clip_polygon(poly, P, eps);
+            if (clipped.size() >= 3) {
+                int base = static_cast<int>(Q.V.size());
+                for (size_t i = 0; i < clipped.size(); ++i) {
+                    Q.V.push_back(clipped[i]);
+                }
+                std::vector<int> idx;
+                for (size_t k = 0; k < clipped.size(); ++k) {
+                    idx.push_back(base + static_cast<int>(k));
+                }
+                Q.F.push_back(idx);
+            }
+            for (size_t i = 0; i < clipped.size(); ++i) {
+                if (std::fabs(signed_dist(P, clipped[i])) <= 2 * eps) {
+                    cutLoopAccum.push_back(clipped[i]);
+                }
             }
         }
 
-        // Weld vertices: build mapping old->new unique by rounding
-        auto keyOf = [&](const V3& a) {
-            const double s = 1.0 / eps;
-            long long ix = (long long)std::llround(a.x * s);
-            long long iy = (long long)std::llround(a.y * s);
-            long long iz = (long long)std::llround(a.z * s);
-            return std::tuple<long long, long long, long long>(ix, iy, iz);
-            };
-        std::unordered_map<std::tuple<long long, long long, long long>, int> vmap;
-        std::vector<V3> WV; WV.reserve(Q.V.size());
+        // Weld vertices using simple map
+        std::map<VKey, int> vmap;
+        std::vector<V3> WV;
+        WV.reserve(Q.V.size());
         std::vector<int> remap(Q.V.size(), -1);
-        for (size_t i = 0;i < Q.V.size();++i) {
-            auto K = keyOf(Q.V[i]);
-            auto it = vmap.find(K);
+
+        for (size_t i = 0; i < Q.V.size(); ++i) {
+            VKey K = make_vertex_key(Q.V[i], eps);
+            std::map<VKey, int>::iterator it = vmap.find(K);
             if (it == vmap.end()) {
-                int nid = int(WV.size());
-                vmap.emplace(K, nid);
+                int nid = static_cast<int>(WV.size());
+                vmap[K] = nid;
                 WV.push_back(Q.V[i]);
                 remap[i] = nid;
             }
@@ -176,66 +220,91 @@ namespace rvd2foam {
                 remap[i] = it->second;
             }
         }
-        for (auto& f : Q.F) {
-            for (int& vi : f) vi = remap[std::size_t(vi)];
-            // remove duplicate consecutive indices
-            std::vector<int> g; g.reserve(f.size());
-            for (int k = 0;k < (int)f.size();++k) {
-                if (g.empty() || WV[std::size_t(g.back())].x != WV[std::size_t(f[k])].x
-                    || WV[std::size_t(g.back())].y != WV[std::size_t(f[k])].y
-                    || WV[std::size_t(g.back())].z != WV[std::size_t(f[k])].z) {
+
+        for (size_t fi = 0; fi < Q.F.size(); ++fi) {
+            std::vector<int>& f = Q.F[fi];
+            for (size_t i = 0; i < f.size(); ++i) {
+                f[i] = remap[f[i]];
+            }
+
+            std::vector<int> g;
+            g.reserve(f.size());
+            for (size_t k = 0; k < f.size(); ++k) {
+                if (g.empty() ||
+                    WV[g.back()].x != WV[f[k]].x ||
+                    WV[g.back()].y != WV[f[k]].y ||
+                    WV[g.back()].z != WV[f[k]].z) {
                     g.push_back(f[k]);
                 }
             }
-            f.swap(g);
+            f = g;
         }
-        Q.V.swap(WV);
+        Q.V = WV;
 
-        // Remove degenerate faces (<3 verts or collinear)
-        auto is_degenerate = [&](const std::vector<int>& f)->bool {
-            if (f.size() < 3) return true;
-            V3 a = Q.V[std::size_t(f[0])];
-            V3 b = Q.V[std::size_t(f[1])];
-            V3 c = Q.V[std::size_t(f[2])];
-            return v_norm(tri_normal(a, b, c)) < 1e-18;
-            };
-        std::vector<std::vector<int>> Fclean; Fclean.reserve(Q.F.size());
-        for (const auto& f : Q.F) if (!is_degenerate(f)) Fclean.push_back(f);
-        Q.F.swap(Fclean);
-
-        // Build the new cut face (if we truly cut off something).
-        if (outCutPolygon) {
-            // Weld and sort the on-plane points to a cycle
-            // 1) Weld
-            std::vector<V3> Cw;
-            std::set<std::tuple<long long, long long, long long>> seen;
-            for (const auto& q : cutLoopAccum) {
-                auto K = keyOf(q);
-                if (seen.insert(K).second) Cw.push_back(q);
+        std::vector<std::vector<int>> Fclean;
+        Fclean.reserve(Q.F.size());
+        for (size_t i = 0; i < Q.F.size(); ++i) {
+            if (!face_is_degenerate(Q.F[i], Q.V)) {
+                Fclean.push_back(Q.F[i]);
             }
-            // 2) If enough points, sort them around plane normal to form a polygon
+        }
+        Q.F = Fclean;
+
+        // Build cut polygon if requested
+        if (outCutPolygon) {
+            std::vector<V3> Cw;
+            std::set<VKey> seen;
+            for (size_t i = 0; i < cutLoopAccum.size(); ++i) {
+                VKey K = make_vertex_key(cutLoopAccum[i], eps);
+                if (seen.find(K) == seen.end()) {
+                    seen.insert(K);
+                    Cw.push_back(cutLoopAccum[i]);
+                }
+            }
             if (Cw.size() >= 3) {
-                // Compute local 2D basis on plane
                 V3 n = P.n;
                 double nn = v_norm(n);
-                if (nn < 1e-30) n = { 0,0,1 }; else n = v_scale(n, 1.0 / nn);
-                V3 tmp = (std::fabs(n.x) < 0.9 ? V3{ 1,0,0 } : V3{ 0,1,0 });
-                V3 u = v_scale(v_sub(tmp, v_scale(n, v_dot(n, tmp))), 1.0 / std::max(1e-30, v_norm(v_sub(tmp, v_scale(n, v_dot(n, tmp))))));
-                V3 v = v_cross(n, u);
-                // centroid
-                V3 C{ 0,0,0 }; for (auto& q : Cw) C = v_add(C, q);
-                C = v_scale(C, 1.0 / double(Cw.size()));
-                // angle sort
-                struct Node { V3 q; double ang; };
-                std::vector<Node> nodes; nodes.reserve(Cw.size());
-                for (auto& q : Cw) {
-                    V3 d = v_sub(q, C);
-                    double x = v_dot(d, u), y = v_dot(d, v);
-                    nodes.push_back({ q, std::atan2(y,x) });
+                if (nn < 1e-30) {
+                    n.x = 0; n.y = 0; n.z = 1;
                 }
-                std::sort(nodes.begin(), nodes.end(), [](const Node& A, const Node& B) { return A.ang < B.ang; });
-                std::vector<V3> poly; poly.reserve(nodes.size());
-                for (auto& nd : nodes) poly.push_back(nd.q);
+                else {
+                    n = v_scale(n, 1.0 / nn);
+                }
+
+                V3 tmp = (std::fabs(n.x) < 0.9) ? V3{ 1,0,0 } : V3{ 0,1,0 };
+                V3 u_raw = v_sub(tmp, v_scale(n, v_dot(n, tmp)));
+                double ulen = v_norm(u_raw);
+                V3 u = (ulen < 1e-30) ? V3{ 1,0,0 } : v_scale(u_raw, 1.0 / ulen);
+                V3 v = v_cross(n, u);
+
+                V3 C = { 0,0,0 };
+                for (size_t i = 0; i < Cw.size(); ++i) {
+                    C = v_add(C, Cw[i]);
+                }
+                C = v_scale(C, 1.0 / double(Cw.size()));
+
+                struct Node { V3 q; double ang; };
+                std::vector<Node> nodes;
+                nodes.reserve(Cw.size());
+                for (size_t i = 0; i < Cw.size(); ++i) {
+                    V3 d = v_sub(Cw[i], C);
+                    double x = v_dot(d, u), y = v_dot(d, v);
+                    Node node;
+                    node.q = Cw[i];
+                    node.ang = std::atan2(y, x);
+                    nodes.push_back(node);
+                }
+
+                // Simple sort function
+                std::sort(nodes.begin(), nodes.end(), [](const Node& a, const Node& b) {
+                    return a.ang < b.ang;
+                    });
+
+                std::vector<V3> poly;
+                poly.reserve(nodes.size());
+                for (size_t i = 0; i < nodes.size(); ++i) {
+                    poly.push_back(nodes[i].q);
+                }
                 *outCutPolygon = poly;
             }
             else {
@@ -245,70 +314,53 @@ namespace rvd2foam {
         return Q;
     }
 
-    // ====================== face & vertex global bookkeeping ======================
+    // =========================== Simple face key using basic types ===========================
 
-    struct FaceRec { std::vector<int> vid; int owner = -1; int neighbour = -1; };
+    struct FaceKey {
+        std::vector<int> vertices;
 
-    struct VHash {
-        std::size_t operator()(const std::tuple<long long, long long, long long>& k) const noexcept {
-            auto [a, b, c] = k;
-            std::size_t h = 1469598103934665603ull;
-            h ^= std::hash<long long>{}(a); h *= 1099511628211ull;
-            h ^= std::hash<long long>{}(b); h *= 1099511628211ull;
-            h ^= std::hash<long long>{}(c); h *= 1099511628211ull;
-            return h;
+        bool operator<(const FaceKey& other) const {
+            if (vertices.size() != other.vertices.size()) {
+                return vertices.size() < other.vertices.size();
+            }
+            for (size_t i = 0; i < vertices.size(); ++i) {
+                if (vertices[i] != other.vertices[i]) {
+                    return vertices[i] < other.vertices[i];
+                }
+            }
+            return false;
         }
     };
 
     static int add_global_point(const V3& p, std::vector<std::array<double, 3>>& P,
-        std::unordered_map<std::tuple<long long, long long, long long>, int, VHash>& map,
-        double eps)
+        std::map<VKey, int>& map, double eps)
     {
-        const double s = 1.0 / eps;
-        auto key = std::make_tuple(std::llround(p.x * s), std::llround(p.y * s), std::llround(p.z * s));
-        auto it = map.find(key);
+        VKey key = make_vertex_key(p, eps);
+        std::map<VKey, int>::iterator it = map.find(key);
         if (it != map.end()) return it->second;
-        int id = (int)P.size();
-        P.push_back({ p.x,p.y,p.z });
-        map.emplace(key, id);
+        int id = static_cast<int>(P.size());
+        std::array<double, 3> arr = { { p.x, p.y, p.z } };
+        P.push_back(arr);
+        map[key] = id;
         return id;
     }
 
-    static std::size_t face_key_hash(const std::vector<int>& v) {
-        std::vector<int> k = v; std::sort(k.begin(), k.end());
-        std::size_t h = 1469598103934665603ull;
-        for (int x : k) { h ^= std::size_t(x + 0x9e3779b9); h *= 1099511628211ull; }
-        return h;
-    }
-    struct FKey { std::vector<int> k; };
-    struct FKeyHasher {
-        std::size_t operator()(const FKey& f) const noexcept {
-            return face_key_hash(f.k);
-        }
-    };
-    struct FKeyEq {
-        bool operator()(const FKey& a, const FKey& b) const noexcept {
-            if (a.k.size() != b.k.size()) return false;
-            for (size_t i = 0;i < a.k.size();++i) if (a.k[i] != b.k[i]) return false;
-            return true;
-        }
-    };
-
     // =========================== RVD core ===========================
 
-    // Build plane for bisector between s0 and si: { x | ||x-s0|| <= ||x-si|| }.
-    // Inequality: 2(si-s0)·x <= ||si||^2 - ||s0||^2  -> n·x <= c
     static inline Plane bisector_plane(V3 s0, V3 si) {
         V3 n = v_sub(si, s0);
         double c = 0.5 * (v_dot(si, si) - v_dot(s0, s0));
-        return { n,c };
+        Plane plane;
+        plane.n = n;
+        plane.c = c;
+        return plane;
     }
 
     static V3 tet_centroid(const double* pts, const uint32_t* T) {
-        V3 a{ pts[3 * T[0] + 0], pts[3 * T[0] + 1], pts[3 * T[0] + 2] };
-        V3 b{ pts[3 * T[1] + 0], pts[3 * T[1] + 1], pts[3 * T[1] + 2] };
-        V3 c{ pts[3 * T[2] + 0], pts[3 * T[2] + 1], pts[3 * T[2] + 2] };
-        V3 d{ pts[3 * T[3] + 0], pts[3 * T[3] + 1], pts[3 * T[3] + 2] };
+        V3 a = { pts[3 * T[0] + 0], pts[3 * T[0] + 1], pts[3 * T[0] + 2] };
+        V3 b = { pts[3 * T[1] + 0], pts[3 * T[1] + 1], pts[3 * T[1] + 2] };
+        V3 c = { pts[3 * T[2] + 0], pts[3 * T[2] + 1], pts[3 * T[2] + 2] };
+        V3 d = { pts[3 * T[3] + 0], pts[3 * T[3] + 1], pts[3 * T[3] + 2] };
         V3 s = v_add(v_add(a, b), v_add(c, d));
         return v_scale(s, 0.25);
     }
@@ -325,96 +377,63 @@ namespace rvd2foam {
     {
         if (!tet.points || tet.numPoints == 0 || !tet.tets || tet.numTets == 0) return false;
 
-        // Epsilon (merge/clip tolerance) ~ 1e-9 of bbox diagonal
-        double xmin = +std::numeric_limits<double>::infinity();
+        // Calculate epsilon
+        double xmin = std::numeric_limits<double>::infinity();
         double ymin = xmin, zmin = xmin, xmax = -xmin, ymax = -xmin, zmax = -xmin;
-        for (std::size_t i = 0;i < tet.numPoints;i++) {
+        for (std::size_t i = 0; i < tet.numPoints; i++) {
             double x = tet.points[3 * i + 0], y = tet.points[3 * i + 1], z = tet.points[3 * i + 2];
             xmin = std::min(xmin, x); xmax = std::max(xmax, x);
             ymin = std::min(ymin, y); ymax = std::max(ymax, y);
             zmin = std::min(zmin, z); zmax = std::max(zmax, z);
         }
-        double diag = std::sqrt((xmax - xmin) * (xmax - xmin) + (ymax - ymin) * (ymax - ymin) + (zmax - zmin) * (zmax - zmin));
-        const double EPS = std::max(1e-12, 1e-9 * diag);
+        double dx = xmax - xmin, dy = ymax - ymin, dz = zmax - zmin;
+        double diag = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double EPS = (diag > 0 ? 1e-9 * diag : 1e-12);
 
-        // Seeds: use provided or per-tet centroids
+        // Seeds setup
         std::vector<double> seeds;
         const double* S = nullptr;
-        std::size_t   NS = 0;
+        std::size_t NS = 0;
         if (seedsIn.xyz && seedsIn.count) {
-            S = seedsIn.xyz; NS = seedsIn.count;
+            S = seedsIn.xyz;
+            NS = seedsIn.count;
         }
         else {
             seeds.resize(tet.numTets * 3);
-            for (std::size_t e = 0;e < tet.numTets;++e) {
+            for (std::size_t e = 0; e < tet.numTets; ++e) {
                 const uint32_t* T = tet.tets + 4 * e;
                 V3 c = tet_centroid(tet.points, T);
-                seeds[3 * e + 0] = c.x; seeds[3 * e + 1] = c.y; seeds[3 * e + 2] = c.z;
+                seeds[3 * e + 0] = c.x;
+                seeds[3 * e + 1] = c.y;
+                seeds[3 * e + 2] = c.z;
             }
-            S = seeds.data(); NS = tet.numTets;
+            S = seeds.data();
+            NS = tet.numTets;
         }
 
-        // Global vertex map
-        out.points.clear(); out.faces.clear(); out.owner.clear(); out.neighbour.clear();
-        std::unordered_map<std::tuple<long long, long long, long long>, int, VHash> pointMap;
-        pointMap.reserve(tet.numTets * 8);
+        out.points.clear();
+        out.faces.clear();
+        out.owner.clear();
+        out.neighbour.clear();
 
-        // Global face map: sorted vertex indices -> face index in out.faces
-        std::unordered_map<FKey, int, FKeyHasher, FKeyEq> faceMap;
-        faceMap.reserve(tet.numTets * 16);
-
-        // Accumulate per-cell vertices to estimate centroids for orientation fix
+        std::map<VKey, int> pointMap;
+        std::map<FaceKey, int> faceMap;
         std::vector<std::vector<int>> cellVerts(NS);
 
-        auto register_face = [&](const std::vector<int>& vtx, int owner, int neighbour) {
-            // canonical key
-            FKey key; key.k = vtx; std::sort(key.k.begin(), key.k.end());
-            auto it = faceMap.find(key);
-            if (it == faceMap.end()) {
-                int idx = (int)out.faces.size();
-                faceMap.emplace(key, idx);
-                out.faces.push_back(vtx);
-                out.owner.push_back(owner);
-                if (neighbour >= 0) out.neighbour.push_back(neighbour);
-            }
-            else {
-                int idx = it->second;
-                // set neighbour only if not yet set (neighbour is stored in the internal prefix)
-                // If this face was previously added as boundary, we cannot rewrite neighbour inline;
-                // but by construction we only register internal "cut" faces here before boundary.
-                int internalCount = (int)out.neighbour.size();
-                if (idx < internalCount) {
-                    // already internal; nothing to do
-                }
-                else {
-                    // This is unexpected in this simple pass; ignore.
-                }
-            }
-            };
-
-        // RVD by per-tet clipping
-        // NOTE: For simplicity, we consider all other seeds when clipping.
-        // We’ll optimize later by culling distant seeds.
         std::size_t totalCuts = 0;
-        for (std::size_t e = 0;e < tet.numTets;++e) {
+        for (std::size_t e = 0; e < tet.numTets; ++e) {
             const uint32_t* T = tet.tets + 4 * e;
-            V3 p0{ tet.points[3 * T[0] + 0], tet.points[3 * T[0] + 1], tet.points[3 * T[0] + 2] };
-            V3 p1{ tet.points[3 * T[1] + 0], tet.points[3 * T[1] + 1], tet.points[3 * T[1] + 2] };
-            V3 p2{ tet.points[3 * T[2] + 0], tet.points[3 * T[2] + 1], tet.points[3 * T[2] + 2] };
-            V3 p3{ tet.points[3 * T[3] + 0], tet.points[3 * T[3] + 1], tet.points[3 * T[3] + 2] };
+            V3 p0 = { tet.points[3 * T[0] + 0], tet.points[3 * T[0] + 1], tet.points[3 * T[0] + 2] };
+            V3 p1 = { tet.points[3 * T[1] + 0], tet.points[3 * T[1] + 1], tet.points[3 * T[1] + 2] };
+            V3 p2 = { tet.points[3 * T[2] + 0], tet.points[3 * T[2] + 1], tet.points[3 * T[2] + 2] };
+            V3 p3 = { tet.points[3 * T[3] + 0], tet.points[3 * T[3] + 1], tet.points[3 * T[3] + 2] };
 
-            // If no explicit seeds: seed 0 for this tet is its centroid (index = e)
-            // Otherwise, you can choose a policy; here we still use the centroid index as the "owner id".
-            // You can map tet->seed id differently later.
-            std::size_t ownerSeed = (seedsIn.xyz && seedsIn.count) ? e % NS : e;
-
+            std::size_t ownerSeed = (seedsIn.xyz && seedsIn.count) ? (e % NS) : e;
             V3 s0 = seed_at(S, ownerSeed);
 
-            // Start with the tet as Ωᵉ
             Poly3 cell = make_tet_poly(p0, p1, p2, p3);
 
-            // For all other seeds si, clip by the perpendicular bisector (keep closer to s0)
-            for (std::size_t j = 0;j < NS;++j) {
+            for (std::size_t j = 0; j < NS; ++j) {
                 if (j == ownerSeed) continue;
                 V3 si = seed_at(S, j);
                 Plane H = bisector_plane(s0, si);
@@ -423,47 +442,63 @@ namespace rvd2foam {
                 Poly3 clipped = clip_polyhedron(cell, H, EPS, &cutPoly);
 
                 if (clipped.V.empty() || clipped.F.empty()) {
-                    cell.V.clear(); cell.F.clear(); break; // nothing remains for s0 in this tet
+                    cell.V.clear();
+                    cell.F.clear();
+                    break;
                 }
 
-                // If this plane actually cut the cell, we got a cut face polygon
                 if (cutPoly.size() >= 3) {
-                    // Register cut face as an internal face between (ownerSeed, neighbour=j)
-                    std::vector<int> vids; vids.reserve(cutPoly.size());
-                    for (const auto& q : cutPoly) {
-                        int gi = add_global_point(q, out.points, pointMap, EPS);
+                    std::vector<int> vids;
+                    vids.reserve(cutPoly.size());
+                    for (size_t k = 0; k < cutPoly.size(); ++k) {
+                        int gi = add_global_point(cutPoly[k], out.points, pointMap, EPS);
                         vids.push_back(gi);
                         cellVerts[ownerSeed].push_back(gi);
                     }
-                    // Face orientation will be fixed globally later.
-                    register_face(vids, (int)ownerSeed, (int)j);
+
+                    // Register face
+                    FaceKey key;
+                    key.vertices = vids;
+                    std::sort(key.vertices.begin(), key.vertices.end());
+
+                    std::map<FaceKey, int>::iterator it = faceMap.find(key);
+                    if (it == faceMap.end()) {
+                        int idx = static_cast<int>(out.faces.size());
+                        faceMap[key] = idx;
+                        out.faces.push_back(vids);
+                        out.owner.push_back(static_cast<int>(ownerSeed));
+                        out.neighbour.push_back(static_cast<int>(j));
+                    }
+
                     totalCuts++;
                 }
-                std::swap(cell, clipped);
+
+                cell = clipped;
             }
 
-            // Any remaining faces lying on the original tet boundary are domain boundary faces.
-            // Add them now as boundary faces (neighbour = -1).
-            for (const auto& f : cell.F) {
-                // Build polygon geometry
-                std::vector<V3> poly; poly.reserve(f.size());
-                for (int vi : f) poly.push_back(cell.V[std::size_t(vi)]);
-                // Convert to global indices
-                std::vector<int> vids; vids.reserve(f.size());
-                for (const auto& q : poly) {
+            // Domain boundary faces
+            for (size_t fi = 0; fi < cell.F.size(); ++fi) {
+                const std::vector<int>& f = cell.F[fi];
+                std::vector<int> vids;
+                vids.reserve(f.size());
+                for (size_t i = 0; i < f.size(); ++i) {
+                    const V3& q = cell.V[f[i]];
                     int gi = add_global_point(q, out.points, pointMap, EPS);
                     vids.push_back(gi);
                     cellVerts[ownerSeed].push_back(gi);
                 }
-                // Register as boundary face
-                // (May be duplicated across adjacent tets/owners; dedup map will coalesce.)
-                FKey key; key.k = vids; std::sort(key.k.begin(), key.k.end());
+
+                if (vids.size() < 3) continue;
+
+                FaceKey key;
+                key.vertices = vids;
+                std::sort(key.vertices.begin(), key.vertices.end());
+
                 if (faceMap.find(key) == faceMap.end()) {
-                    int idx = (int)out.faces.size();
-                    faceMap.emplace(key, idx);
+                    int idx = static_cast<int>(out.faces.size());
+                    faceMap[key] = idx;
                     out.faces.push_back(vids);
-                    out.owner.push_back((int)ownerSeed);
-                    // boundary faces are appended *after* internal; neighbour omitted
+                    out.owner.push_back(static_cast<int>(ownerSeed));
                 }
             }
         }
@@ -475,104 +510,118 @@ namespace rvd2foam {
                 << "  points=" << out.points.size() << "\n";
         }
 
-        // ---------- Orientation fix (OpenFOAM expects owner-facing outward) ----------
-        // Build crude owner centroids from unique vertex averages.
-        std::vector<V3> ownerC(NS, V3{ 0,0,0 });
-        std::vector<int> ownerN(NS, 0);
+        // Orientation fix
+        std::vector<V3> ownerC(NS);
         for (std::size_t cid = 0; cid < NS; ++cid) {
-            auto& vv = cellVerts[cid];
+            ownerC[cid].x = ownerC[cid].y = ownerC[cid].z = 0.0;
+
+            std::vector<int>& vv = cellVerts[cid];
             std::sort(vv.begin(), vv.end());
             vv.erase(std::unique(vv.begin(), vv.end()), vv.end());
-            V3 acc{ 0,0,0 };
-            for (int gi : vv) {
-                acc.x += out.points[std::size_t(gi)][0];
-                acc.y += out.points[std::size_t(gi)][1];
-                acc.z += out.points[std::size_t(gi)][2];
+
+            V3 acc = { 0,0,0 };
+            for (size_t i = 0; i < vv.size(); ++i) {
+                int gi = vv[i];
+                if (gi >= 0 && gi < static_cast<int>(out.points.size())) {
+                    acc.x += out.points[gi][0];
+                    acc.y += out.points[gi][1];
+                    acc.z += out.points[gi][2];
+                }
             }
             if (!vv.empty()) {
                 double inv = 1.0 / double(vv.size());
-                ownerC[cid] = { acc.x * inv, acc.y * inv, acc.z * inv };
-                ownerN[cid] = (int)vv.size();
+                ownerC[cid].x = acc.x * inv;
+                ownerC[cid].y = acc.y * inv;
+                ownerC[cid].z = acc.z * inv;
             }
         }
 
-        // Split into internal and boundary lists as OpenFOAM expects:
-        // neighbour applies only to internal faces and must be a contiguous prefix.
+        const int n_internal = static_cast<int>(out.neighbour.size());
+
         std::vector<std::vector<int>> faces_internal;
         std::vector<int> owners_internal, neigh_internal;
-        faces_internal.reserve(out.faces.size());
-        owners_internal.reserve(out.faces.size());
-        neigh_internal.reserve(out.faces.size());
 
         std::vector<std::vector<int>> faces_boundary;
         std::vector<int> owners_boundary;
-        faces_boundary.reserve(out.faces.size());
-        owners_boundary.reserve(out.faces.size());
 
-        // First pass: detect which faces are internal (have neighbour registered earlier).
-        // In our simple assembler, internal faces got registered first via 'register_face'
-        // and boundary faces were added afterwards without neighbour entries.
-        // So we use a simple rule: a face is internal if it appears (owner, neighbour) pair existed
-        // in the first pass. Here we recompute: if both owner & neighbour cells saw this face,
-        // it will appear twice; dedup earlier kept the first as owner and we pushed 'neighbour'.
-        // We can detect internal by finding any other face with the exact same sorted-vertex key
-        // in the prefix where neighbour exists; but we already constructed the neighbour list
-        // as we went. So we take 'neighbour.size()' as internal count.
-        const int n_internal = (int)out.neighbour.size();
+        // Process internal faces
+        for (int i = 0; i < n_internal; i++) {
+            std::vector<int> vids = out.faces[i];
+            int own = out.owner[i];
+            int nei = out.neighbour[i];
 
-        for (int i = 0;i < n_internal;i++) {
-            auto vids = out.faces[std::size_t(i)];
-            int own = out.owner[std::size_t(i)];
-            int nei = out.neighbour[std::size_t(i)];
-            // Orientation: outward from owner
-            std::vector<V3> P; P.reserve(vids.size());
-            for (int gi : vids) P.push_back(V3{ out.points[std::size_t(gi)][0],
-                                                out.points[std::size_t(gi)][1],
-                                                out.points[std::size_t(gi)][2] });
+            if (own < 0 || own >= static_cast<int>(NS) || nei < 0 || nei >= static_cast<int>(NS)) continue;
+
+            std::vector<V3> P;
+            P.reserve(vids.size());
+            for (size_t j = 0; j < vids.size(); ++j) {
+                int gi = vids[j];
+                if (gi >= 0 && gi < static_cast<int>(out.points.size())) {
+                    V3 point;
+                    point.x = out.points[gi][0];
+                    point.y = out.points[gi][1];
+                    point.z = out.points[gi][2];
+                    P.push_back(point);
+                }
+            }
+
+            if (P.size() < 3) continue;
+
             V3 Cf = poly_centroid(P);
             V3 n = newell_normal(P);
-            V3 Co = ownerC[std::size_t(own)];
+            V3 Co = ownerC[own];
             if (v_dot(n, v_sub(Cf, Co)) < 0.0) {
                 std::reverse(vids.begin(), vids.end());
             }
-            faces_internal.push_back(std::move(vids));
+            faces_internal.push_back(vids);
             owners_internal.push_back(own);
             neigh_internal.push_back(nei);
         }
 
-        for (std::size_t i = n_internal; i < out.faces.size(); ++i) {
-            auto vids = out.faces[i];
+        // Process boundary faces
+        for (size_t i = n_internal; i < out.faces.size(); ++i) {
+            std::vector<int> vids = out.faces[i];
             int own = out.owner[i];
-            std::vector<V3> P; P.reserve(vids.size());
-            for (int gi : vids) P.push_back(V3{ out.points[std::size_t(gi)][0],
-                                                out.points[std::size_t(gi)][1],
-                                                out.points[std::size_t(gi)][2] });
+
+            if (own < 0 || own >= static_cast<int>(NS)) continue;
+
+            std::vector<V3> P;
+            P.reserve(vids.size());
+            for (size_t j = 0; j < vids.size(); ++j) {
+                int gi = vids[j];
+                if (gi >= 0 && gi < static_cast<int>(out.points.size())) {
+                    V3 point;
+                    point.x = out.points[gi][0];
+                    point.y = out.points[gi][1];
+                    point.z = out.points[gi][2];
+                    P.push_back(point);
+                }
+            }
+
+            if (P.size() < 3) continue;
+
             V3 Cf = poly_centroid(P);
             V3 n = newell_normal(P);
-            V3 Co = ownerC[std::size_t(own)];
+            V3 Co = ownerC[own];
             if (v_dot(n, v_sub(Cf, Co)) < 0.0) {
                 std::reverse(vids.begin(), vids.end());
             }
-            faces_boundary.push_back(std::move(vids));
+            faces_boundary.push_back(vids);
             owners_boundary.push_back(own);
         }
 
-        // Repack in OpenFOAM order: internal faces first (have neighbour),
-        // boundary faces after (no neighbour entries).
+        // Rebuild output
         out.faces.clear();
         out.owner.clear();
-        // keep neighbour content
-        std::vector<int> N = std::move(out.neighbour);
 
-        for (size_t i = 0;i < faces_internal.size();++i) {
-            out.faces.push_back(std::move(faces_internal[i]));
+        for (size_t i = 0; i < faces_internal.size(); ++i) {
+            out.faces.push_back(faces_internal[i]);
             out.owner.push_back(owners_internal[i]);
         }
-        // neighbour stays intact (same count)
-        out.neighbour = std::move(neigh_internal);
+        out.neighbour = neigh_internal;
 
-        for (size_t i = 0;i < faces_boundary.size();++i) {
-            out.faces.push_back(std::move(faces_boundary[i]));
+        for (size_t i = 0; i < faces_boundary.size(); ++i) {
+            out.faces.push_back(faces_boundary[i]);
             out.owner.push_back(owners_boundary[i]);
         }
 
@@ -584,7 +633,7 @@ namespace rvd2foam {
         return true;
     }
 
-    // =========================== OpenFOAM writer (ASCII) ===========================
+    // =========================== OpenFOAM writer ===========================
 
     static void writeHeader(std::ostream& os, const std::string& cls, const std::string& obj) {
         os <<
@@ -593,19 +642,18 @@ namespace rvd2foam {
             "    version     2.0;\n"
             "    format      ascii;\n"
             "    class       " << cls << ";\n"
-            "    location    \"polyMesh\";\n"
+            "    location    \"constant/polyMesh\";\n"
             "    object      " << obj << ";\n"
             "}\n\n";
     }
 
-    // tiny mkdir wrapper
     static bool ensureDir(const std::string& path) {
 #if defined(_WIN32)
         std::string cmd = "mkdir \"" + path + "\" >nul 2>nul";
 #else
         std::string cmd = "mkdir -p \"" + path + "\"";
 #endif
-        return std::system(cmd.c_str()) == 0;
+        return std::system(cmd.c_str()) >= 0;
     }
 
     bool writeOpenFOAMPolyMesh(
@@ -615,54 +663,78 @@ namespace rvd2foam {
     {
         if (!ensureDir(polyMeshDir)) return false;
 
+        if (m.points.empty() || m.faces.empty() || m.owner.empty()) {
+            std::cerr << "ERROR: Invalid mesh data\n";
+            return false;
+        }
+
         // points
         {
             std::ofstream os(polyMeshDir + "/points");
+            if (!os) return false;
             writeHeader(os, "vectorField", "points");
             os << m.points.size() << "\n(\n";
-            for (const auto& p : m.points) {
-                os << "(" << std::setprecision(17) << p[0] << " " << p[1] << " " << p[2] << ")\n";
+            for (size_t i = 0; i < m.points.size(); ++i) {
+                const std::array<double, 3>& p = m.points[i];
+                os << "(" << std::scientific << std::setprecision(15)
+                    << p[0] << " " << p[1] << " " << p[2] << ")\n";
             }
             os << ")\n";
         }
+
         // faces
         {
             std::ofstream os(polyMeshDir + "/faces");
+            if (!os) return false;
             writeHeader(os, "faceList", "faces");
             os << m.faces.size() << "\n(\n";
-            for (const auto& f : m.faces) {
-                os << f.size() << "(";
-                for (std::size_t i = 0;i < f.size();++i) {
-                    os << f[i] << (i + 1 < f.size() ? " " : "");
+            for (size_t i = 0; i < m.faces.size(); ++i) {
+                const std::vector<int>& f = m.faces[i];
+                if (f.size() >= 3) {
+                    os << f.size() << "(";
+                    for (std::size_t j = 0; j < f.size(); ++j) {
+                        os << f[j] << (j + 1 < f.size() ? " " : "");
+                    }
+                    os << ")\n";
                 }
-                os << ")\n";
             }
             os << ")\n";
         }
+
         // owner
         {
             std::ofstream os(polyMeshDir + "/owner");
+            if (!os) return false;
             writeHeader(os, "labelList", "owner");
             os << m.owner.size() << "\n(\n";
-            for (int c : m.owner) os << c << "\n";
+            for (size_t i = 0; i < m.owner.size(); ++i) {
+                os << m.owner[i] << "\n";
+            }
             os << ")\n";
         }
-        // neighbour (internal faces only)
+
+        // neighbour
         {
             std::ofstream os(polyMeshDir + "/neighbour");
+            if (!os) return false;
             writeHeader(os, "labelList", "neighbour");
             os << m.neighbour.size() << "\n(\n";
-            for (int c : m.neighbour) os << c << "\n";
+            for (size_t i = 0; i < m.neighbour.size(); ++i) {
+                os << m.neighbour[i] << "\n";
+            }
             os << ")\n";
         }
-        // boundary (single patch for now)
+
+        // boundary
         {
-            const int startFace = (int)m.neighbour.size();
-            const int nBoundary = (int)m.faces.size() - startFace;
+            const int startFace = static_cast<int>(m.neighbour.size());
+            const int nBoundary = static_cast<int>(m.faces.size()) - startFace;
             std::ofstream os(polyMeshDir + "/boundary");
+            if (!os) return false;
             writeHeader(os, "polyBoundaryMesh", "boundary");
-            os << 1 << "\n(\n";
-            os << "    " << m.boundaryName << "\n    {\n";
+            os << "1\n(\n";
+            os << "    " << m.boundaryName << "\n";
+            os << "    {\n";
             os << "        type            " << m.boundaryType << ";\n";
             os << "        nFaces          " << nBoundary << ";\n";
             os << "        startFace       " << startFace << ";\n";
@@ -672,11 +744,6 @@ namespace rvd2foam {
 
         if (verbose) {
             std::cout << "[RVD->OpenFOAM] Wrote polyMesh to: " << polyMeshDir << "\n";
-            std::cout << "  points=" << m.points.size()
-                << " faces=" << m.faces.size()
-                << " owner=" << m.owner.size()
-                << " neighbour=" << m.neighbour.size()
-                << " patches=1\n";
         }
         return true;
     }
