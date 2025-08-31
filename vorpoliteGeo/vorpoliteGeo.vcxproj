@@ -134,14 +134,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="gmshReader.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="rvd_geometry.cpp" />
     <ClCompile Include="rvd_meshio_gmsh_v1.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="gmshReader.h" />
-    <ClInclude Include="meshData.h" />
     <ClInclude Include="rvd_geometry.h" />
     <ClInclude Include="rvd_meshio_gmsh_v1.h" />
     <ClInclude Include="rvd_types.h" />

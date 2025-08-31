@@ -19,19 +19,19 @@ namespace rvd {
 
     // Concrete container for a tet mesh loaded from file.
     struct TetMesh {
-        std::vector<std::array<double, 3>> points;       // xyz
-        std::vector<std::array<uint32_t, 4>> tets;       // 0-based indices
-        std::vector<std::array<uint32_t, 3>> tris;       // optional tri elems (0-based), if present
+        std::vector<std::array<double, 3>>  points; // xyz
+        std::vector<std::array<uint32_t, 4>> tets;  // 0-based indices
+        std::vector<std::array<uint32_t, 3>> tris;  // optional boundary tris (0-based)
     };
 
-    // Input sites (Voronoi/Laguerre). If xyz==nullptr, we’ll synthesize one per tet.
+    // Input sites (Voronoi/Laguerre). If xyz==nullptr, we’ll synthesize one per tet later.
     struct SeedCloud {
         const double* xyz = nullptr;  // length = 3*count (or nullptr)
         const double* w = nullptr;  // optional weights (nullptr => zeros)
         std::size_t   count = 0;
     };
 
-    // Internal face record (used later in the builder; included here for completeness).
+    // Internal face record (placeholder for later steps).
     struct FaceRec {
         std::vector<int> verts;  // vertex ids into a global point array
         int owner = -1;

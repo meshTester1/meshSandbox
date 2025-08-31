@@ -32,7 +32,7 @@ namespace rvd {
     // convex polyhedron container
     struct Poly3 {
         std::vector<V3>               V;   // vertices
-        std::vector<std::vector<int>> F;   // faces: CCW vertex loops
+        std::vector<std::vector<int>> F;   // faces: CCW loops
     };
 
     // make a tet poly from packed buffers
