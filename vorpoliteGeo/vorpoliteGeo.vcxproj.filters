@@ -18,10 +18,13 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="foamWriter.cpp">
+    <ClCompile Include="gmshReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="gmshReader.cpp">
+    <ClCompile Include="rvd_geometry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="rvd_meshio_gmsh_v1.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -32,7 +35,13 @@
     <ClInclude Include="gmshReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="foamWriter.h">
+    <ClInclude Include="rvd_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="rvd_geometry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="rvd_meshio_gmsh_v1.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

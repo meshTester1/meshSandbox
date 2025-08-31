@@ -1,0 +1,41 @@
+here you go — super quick checklist:
+
+rvd_types.h
+Do: PODs & keys (TetMeshView, SeedCloud, OpenFOAMPolyMesh, TriKey, FaceRec)
+Quick test: compiles.
+
+rvd_geometry.{h,cpp}
+Do: V3/Plane ops, tet_centroid, power_bisector, clip_polygon/polyhedron
+Quick test: clip a unit tet by x≤0.25 → cut polygon exists (≥3 verts).
+
+rvd_sites.{h,cpp}
+Do: make_sites (copy input or per-tet centroids)
+Quick test: empty seeds → count == #tets.
+
+rvd_exterior.{h,cpp}
+Do: build_exterior_face_counts (count 4 faces per tet)
+Quick test: two tets sharing a face → that face count=2, others=1.
+
+rvd_power.{h,cpp}
+Do: build_candidate_neighbors (naive all except self)
+Quick test: n sites → each list size n−1.
+
+rvd_builder.{h,cpp} — Phase A
+Do: accumulate_internal_faces (clip by bisectors; register internal faces only)
+Quick test: 1 tet, 2 sites → exactly 1 internal face, no boundary.
+
+rvd_builder.{h,cpp} — Phase B
+Do: add_outer_boundary_faces (only exterior tris → boundary faces)
+Quick test: two-tet slab → no faces on shared interior tri; boundary only outside.
+
+rvd_pack.{h,cpp}
+Do: compute_owner_centroids + pack_openfoam (internal first, then boundary; orient outward)
+Quick test: neighbour.size == #internal; normals point away from owner.
+
+convertRVD.{h,cpp}
+Do: orchestrate steps 2→8 in order
+Quick test: end-to-end run produces sane counts.
+
+(optional) rvd_writer.{h,cpp}
+Do: ASCII polyMesh writer (points/faces/owner/neighbour/boundary)
+Quick test: write + checkMesh runs clean.
