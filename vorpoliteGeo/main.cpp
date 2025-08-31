@@ -1,47 +1,71 @@
-﻿// main.cpp — Minimal RVD harness using new modules (no foamWriter, no legacy deps)
-// Build: C++17
-// Usage: vorpoliteGeo <mesh.msh> [--quiet]
-//
-// This loads a Gmsh v1 ASCII tetra mesh via rvd_meshio_gmsh_v1,
-// packs it into a TetMeshView, prints counts, and runs a tiny clip
-// smoke-test on the first tet using rvd_geometry (modules 1–2).
-
+﻿// main.cpp — Clean C++17 implementation avoiding all compiler ambiguities
 #include <iostream>
 #include <string>
 #include <vector>
+#include <array>
 #include <cstdint>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "rvd_types.h"
 #include "rvd_geometry.h"
 #include "rvd_meshio_gmsh_v1.h"
 
-// ---------- helpers ----------
-static std::string getArg(int argc, char** argv, int i, const std::string& dflt) {
-    return (i < argc ? std::string(argv[i]) : dflt);
-}
+namespace {
+    // Helper functions in anonymous namespace
+    std::string getArgument(int argc, char** argv, int index, const std::string& defaultValue) {
+        if (index < argc) {
+            return std::string(argv[index]);
+        }
+        return defaultValue;
+    }
 
-static bool hasFlag(int argc, char** argv, const std::string& flag) {
-    for (int i = 1; i < argc; ++i) if (flag == argv[i]) return true;
-    return false;
+    bool hasFlag(int argc, char** argv, const std::string& flag) {
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == flag) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Explicit min/max functions to avoid macro issues
+    template<typename T>
+    constexpr const T& minimum(const T& a, const T& b) {
+        return (a < b) ? a : b;
+    }
+
+    template<typename T>
+    constexpr const T& maximum(const T& a, const T& b) {
+        return (a > b) ? a : b;
+    }
 }
 
 int main(int argc, char** argv) {
-    const std::string mshPath = getArg(argc, argv, 1, "mediumCube.msh");
+    // Parse command line arguments
+    const std::string meshPath = getArgument(argc, argv, 1, "mediumCube.msh");
     const bool verbose = !hasFlag(argc, argv, "--quiet");
 
-    if (mshPath.empty()) {
+    if (meshPath.empty()) {
         std::cerr << "ERROR: No input mesh file specified\n";
         return 1;
     }
 
-    // 1) Read Gmsh v1 ASCII tetra mesh (modules: rvd_types + rvd_meshio_gmsh_v1)
+    // Step 1: Load the tetrahedral mesh from Gmsh file
     rvd::TetMesh mesh;
-    std::string err;
-    if (!rvd::load_gmsh_v1_ascii(mshPath, mesh, &err)) {
-        std::cerr << "ERROR: Failed to parse Gmsh v1 mesh: " << mshPath << "\n"
-            << "       " << err << "\n";
+    std::string errorMessage;
+
+    const bool loadSuccess = rvd::load_gmsh_v1_ascii(meshPath, mesh, &errorMessage);
+    if (!loadSuccess) {
+        std::cerr << "ERROR: Failed to parse Gmsh v1 mesh: " << meshPath << "\n"
+            << "       " << errorMessage << "\n";
+        return 1;
+    }
+
+    // Validate mesh data
+    if (mesh.points.empty() || mesh.tets.empty()) {
+        std::cerr << "ERROR: mesh has no points or no tetrahedra\n";
         return 1;
     }
 
@@ -51,76 +75,98 @@ int main(int argc, char** argv) {
             << " tris=" << mesh.tris.size() << " (boundary candidates)\n";
     }
 
-    if (mesh.points.empty() || mesh.tets.empty()) {
-        std::cerr << "ERROR: mesh has no points or no tetrahedra\n";
-        return 1;
+    // Step 2: Convert to packed arrays for processing
+    const std::size_t numPoints = mesh.points.size();
+    const std::size_t numTets = mesh.tets.size();
+
+    // Create packed point array (x,y,z,x,y,z,...)
+    std::vector<double> packedPoints;
+    packedPoints.reserve(numPoints * 3);
+
+    for (std::size_t i = 0; i < numPoints; ++i) {
+        const std::array<double, 3>& point = mesh.points[i];
+        packedPoints.push_back(point[0]); // x
+        packedPoints.push_back(point[1]); // y  
+        packedPoints.push_back(point[2]); // z
     }
 
-    // 2) Pack into contiguous arrays for a TetMeshView (future passes use this)
-    std::vector<double> pts;
-    pts.resize(mesh.points.size() * 3);
-    for (size_t i = 0; i < mesh.points.size(); ++i) {
-        pts[3 * i + 0] = mesh.points[i][0];
-        pts[3 * i + 1] = mesh.points[i][1];
-        pts[3 * i + 2] = mesh.points[i][2];
+    // Create packed tetrahedron index array
+    std::vector<std::uint32_t> packedTets;
+    packedTets.reserve(numTets * 4);
+
+    for (std::size_t t = 0; t < numTets; ++t) {
+        const std::array<std::uint32_t, 4>& tet = mesh.tets[t];
+        packedTets.push_back(tet[0]);
+        packedTets.push_back(tet[1]);
+        packedTets.push_back(tet[2]);
+        packedTets.push_back(tet[3]);
     }
 
-    std::vector<uint32_t> tets;
-    tets.resize(mesh.tets.size() * 4);
-    for (size_t e = 0; e < mesh.tets.size(); ++e) {
-        tets[4 * e + 0] = mesh.tets[e][0];
-        tets[4 * e + 1] = mesh.tets[e][1];
-        tets[4 * e + 2] = mesh.tets[e][2];
-        tets[4 * e + 3] = mesh.tets[e][3];
-    }
-
-    rvd::TetMeshView tv{ pts.data(), pts.size() / 3, tets.data(), tets.size() / 4 };
+    // Create mesh view
+    rvd::TetMeshView meshView;
+    meshView.points = packedPoints.data();
+    meshView.numPoints = numPoints;
+    meshView.tets = packedTets.data();
+    meshView.numTets = numTets;
 
     std::cout << "Loaded tetrahedral mesh OK.\n";
 
-    // 3) Quick geometry smoke-test (modules: rvd_geometry) — optional but handy now
-    //    We clip the first tet by a simple Voronoi bisector and report the cut polygon size.
-    if (tv.numTets > 0) {
-        const uint32_t* T0 = tv.tets + 0;
-        // Build the tet as a convex poly and compute its centroid
-        rvd::Poly3 poly = rvd::make_tet_poly(tv.points, T0);
-        rvd::V3 c0 = rvd::tet_centroid(tv.points, T0);
+    // Step 3: Geometry smoke test - clip first tetrahedron
+    if (meshView.numTets > 0) {
+        const std::uint32_t* firstTet = meshView.tets;
 
-        // Create a second "site" slightly offset from c0 to define a bisector plane
-        // Scale offset by bbox diagonal for stability
-        double xmin = +1e300, ymin = +1e300, zmin = +1e300;
-        double xmax = -1e300, ymax = -1e300, zmax = -1e300;
-        for (size_t i = 0; i < tv.numPoints; ++i) {
-            xmin = (std::min)(xmin, tv.points[3 * i + 0]);
-            ymin = (std::min)(ymin, tv.points[3 * i + 1]);
-            zmin = (std::min)(zmin, tv.points[3 * i + 2]);
-            xmax = (std::max)(xmax, tv.points[3 * i + 0]);
-            ymax = (std::max)(ymax, tv.points[3 * i + 1]);
-            zmax = (std::max)(zmax, tv.points[3 * i + 2]);
+        // Create polyhedron from first tetrahedron
+        rvd::Poly3 tetrahedronPoly = rvd::make_tet_poly(meshView.points, firstTet);
+        rvd::V3 tetCentroid = rvd::tet_centroid(meshView.points, firstTet);
+
+        // Calculate bounding box for epsilon calculation
+        double minX = 1e300, minY = 1e300, minZ = 1e300;
+        double maxX = -1e300, maxY = -1e300, maxZ = -1e300;
+
+        for (std::size_t i = 0; i < meshView.numPoints; ++i) {
+            const double x = meshView.points[3 * i + 0];
+            const double y = meshView.points[3 * i + 1];
+            const double z = meshView.points[3 * i + 2];
+
+            minX = minimum(minX, x);
+            maxX = maximum(maxX, x);
+            minY = minimum(minY, y);
+            maxY = maximum(maxY, y);
+            minZ = minimum(minZ, z);
+            maxZ = maximum(maxZ, z);
         }
 
-        const double dx = xmax - xmin, dy = ymax - ymin, dz = zmax - zmin;
-        const double diag = std::sqrt(dx * dx + dy * dy + dz * dz);
-        const double eps = (diag > 0 ? 1e-9 * diag : 1e-12);
+        const double deltaX = maxX - minX;
+        const double deltaY = maxY - minY;
+        const double deltaZ = maxZ - minZ;
+        const double diagonal = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+        const double epsilon = (diagonal > 0.0) ? (1e-9 * diagonal) : 1e-12;
 
-        rvd::V3 c1{ c0.x + 0.05 * diag, c0.y, c0.z }; // slight +x offset
-        rvd::Plane H = rvd::power_bisector(c0, 0.0, c1, 0.0);
+        // Create offset centroid for bisector plane
+        rvd::V3 offsetCentroid;
+        offsetCentroid.x = tetCentroid.x + 0.05 * diagonal;
+        offsetCentroid.y = tetCentroid.y;
+        offsetCentroid.z = tetCentroid.z;
 
-        std::vector<rvd::V3> cutPoly;
-        rvd::Poly3 clipped = rvd::clip_polyhedron(poly, H, eps, &cutPoly);
+        // Create power bisector plane
+        rvd::Plane bisectorPlane = rvd::power_bisector(tetCentroid, 0.0, offsetCentroid, 0.0);
 
-        if (clipped.V.empty() || clipped.F.empty()) {
+        // Perform clipping
+        std::vector<rvd::V3> cutPolygon;
+        rvd::Poly3 clippedPoly = rvd::clip_polyhedron(tetrahedronPoly, bisectorPlane, epsilon, &cutPolygon);
+
+        // Report results
+        if (clippedPoly.V.empty() || clippedPoly.F.empty()) {
             std::cout << "[smoke] bisector removed the entire tet (unexpected for tiny offset)\n";
         }
-        else if (cutPoly.size() >= 3) {
+        else if (cutPolygon.size() >= 3) {
             std::cout << "[smoke] first tet clipped by bisector: cut polygon has "
-                << cutPoly.size() << " vertices\n";
+                << cutPolygon.size() << " vertices\n";
         }
         else {
             std::cout << "[smoke] first tet clipped: no visible intersection polygon\n";
         }
     }
 
-    // That's it for modules 1–2 + loader. Next steps will plug in seeds/exterior/power/builder.
     return 0;
 }
