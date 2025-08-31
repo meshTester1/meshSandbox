@@ -9,8 +9,7 @@
 
 #include "meshData.h"
 #include "gmshReader.h"
-#include "foamWriter.h"   // for --mode=tet
-#include "convertRVD.h"   // standalone RVD (no external libs)
+//#include "foamWriter.h"   // for --mode=tet
 
 // ---------- helpers ----------
 static std::string getArg(int argc, char** argv, int i, const std::string& dflt) {
@@ -132,29 +131,6 @@ int main(int argc, char** argv) {
             std::cerr << "ERROR: No valid tetrahedra after validation\n";
             return 1;
         }
-
-        // Build views for RVD module
-        rvd2foam::TetMeshView tv;
-        tv.points = pts.data();
-        tv.numPoints = gmshData.nodes.size();
-        tv.tets = tetIdx.data();
-        tv.numTets = tetIdx.size() / 4;
-
-        // Empty seeds = use tet centroids
-        rvd2foam::SeedCloud seeds;
-        seeds.xyz = nullptr;
-        seeds.count = 0;
-
-        if (verbose) std::cout << "[rvd] converting " << (tetIdx.size() / 4) << " valid tets...\n";
-
-        bool ok = rvd2foam::convertTetToOpenFOAM(tv, seeds, outDir, verbose);
-        if (!ok) {
-            std::cerr << "ERROR: RVD conversion failed.\n";
-            return 2;
-        }
-        if (verbose) std::cout << "[rvd] done. Run `checkMesh` in the case directory.\n";
-        return 0;
-    }
 
     // Branch B: Legacy tet → poly cells → foamWriter
     else if (mode == "tet") {

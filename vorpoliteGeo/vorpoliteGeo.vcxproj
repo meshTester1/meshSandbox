@@ -134,13 +134,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="convertRVD.cpp" />
     <ClCompile Include="foamWriter.cpp" />
     <ClCompile Include="gmshReader.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="convertRVD.h" />
     <ClInclude Include="foamWriter.h" />
     <ClInclude Include="gmshReader.h" />
     <ClInclude Include="meshData.h" />
