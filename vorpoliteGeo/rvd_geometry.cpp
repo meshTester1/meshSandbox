@@ -1,9 +1,3 @@
-// rvd_geometry.cpp — implementation for math & clipping
-
-#if defined(_WIN32) && !defined(NOMINMAX)
-#define NOMINMAX
-#endif
-
 #include "rvd_geometry.h"
 
 #include <algorithm>
@@ -11,6 +5,10 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
 
 namespace rvd {
 
@@ -61,7 +59,7 @@ namespace rvd {
         // 2 (s1 - s0) · x <= (||s1||^2 - w1) - (||s0||^2 - w0)
         V3 n = v_sub(s1, s0);
         double c = 0.5 * ((v_dot(s1, s1) - w1) - (v_dot(s0, s0) - w0));
-        return { n, c };
+        return { n,c };
     }
 
     static inline double sd(const Plane& P, V3 x) { return v_dot(P.n, x) - P.c; }
