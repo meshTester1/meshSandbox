@@ -1,10 +1,16 @@
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include "rvd_meshio_gmsh_v1.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 namespace rvd {
 
@@ -14,62 +20,14 @@ namespace rvd {
         while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
         return s.substr(a, b - a);
     }
+
     static inline bool ieq(const std::string& a, const char* b) {
         if (a.size() != std::strlen(b)) return false;
-        for (size_t i = 0;i < a.size();++i) if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+        for (size_t i = 0;i < a.size();++i)
+            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
         return true;
     }
 
-    static bool parse_nodes_block(std::istream& is, TetMesh& out, bool legacy, std::string* err) {
-        // legacy: $NOD / $ENDNOD ; modern-ish: $Nodes / $EndNodes
-        std::string line;
-        // next line: number of nodes
-        if (!std::getline(is, line)) { if (err) *err = "Unexpected EOF after $NOD/$Nodes"; return false; }
-        std::istringstream ls(trim(line));
-        std::size_t N = 0; if (!(ls >> N)) { if (err) *err = "Could not read node count"; return false; }
-        out.points.clear(); out.points.resize(N);
-
-        // Node IDs in v1 can be arbitrary; remap to 0..N-1
-        std::unordered_map<long long, uint32_t> id2idx; id2idx.reserve(N);
-
-        for (std::size_t k = 0;k < N;++k) {
-            if (!std::getline(is, line)) { if (err) *err = "Unexpected EOF in nodes block"; return false; }
-            line = trim(line); if (line.empty()) { --k; continue; }
-            std::istringstream ns(line);
-            long long id = 0; double x = 0, y = 0, z = 0;
-            if (!(ns >> id >> x >> y >> z)) { if (err) *err = "Bad node line: " + line; return false; }
-            uint32_t idx = (uint32_t)k;
-            id2idx[id] = idx;
-            out.points[idx] = { x,y,z };
-        }
-
-        // read end token line
-        if (!std::getline(is, line)) { if (err) *err = "Missing end of nodes block"; return false; }
-        line = trim(line);
-        if (legacy) {
-            if (!ieq(line, "$ENDNOD") && !ieq(line, "$EndNodes")) { if (err) *err = "Expected $ENDNOD/$EndNodes"; return false; }
-        }
-        else {
-            if (!ieq(line, "$EndNodes") && !ieq(line, "$ENDNOD")) { if (err) *err = "Expected $EndNodes/$ENDNOD"; return false; }
-        }
-
-        // stash the map in out.tris temporarily? — no, keep local.
-        // We’ll re-open when parsing elements; but we need access to id2idx there.
-        // Solution: return it upward? Simpler: store in a static thread_local. But
-        // easiest is to re-parse IDs in elements by building id2idx again: not possible.
-        // Instead, we keep id2idx in a static to reuse in this load call.
-
-        // To avoid globals, we pass it onward via istream state by saving into ios pword — overkill.
-        // Practical approach: return the map via an out-parameter… so rewrite function signature?
-        // Simpler: we’ll keep id2idx as a file-scope static for the duration of this call.
-
-        // But we cannot share between functions cleanly. Instead, we parse elements in the same scope
-        // as nodes so we can see id2idx. We'll restructure the loader to do both in one function.
-        // (We’re inside helper; we’ll instead move id2idx building to the outer load function.)
-        return true;
-    }
-
-    // We’ll implement load_gmsh_v1_ascii as a single-pass parser keeping id2idx alive.
     bool load_gmsh_v1_ascii(const std::string& path, TetMesh& out, std::string* err) {
         std::ifstream fs(path);
         if (!fs) { if (err) *err = "Cannot open file: " + path; return false; }
@@ -83,10 +41,9 @@ namespace rvd {
             if (line.empty()) continue;
             if (line[0] == '#' || (line.size() >= 2 && line[0] == '/' && line[1] == '/')) continue;
 
-            // Nodes block start?
+            // Nodes
             if (ieq(line, "$NOD") || ieq(line, "$Nodes")) {
                 const bool legacy = ieq(line, "$NOD");
-                // read count
                 if (!std::getline(fs, line)) { if (err) *err = "Unexpected EOF after $NOD/$Nodes"; return false; }
                 std::istringstream ls(trim(line));
                 std::size_t N = 0; if (!(ls >> N)) { if (err) *err = "Could not read node count"; return false; }
@@ -101,7 +58,10 @@ namespace rvd {
                     if (!(ns >> id >> x >> y >> z)) { if (err) *err = "Bad node line: " + line; return false; }
                     uint32_t idx = (uint32_t)k;
                     id2idx[id] = idx;
-                    out.points[idx] = { x,y,z };
+                    // Explicit array assignment to avoid any compiler issues
+                    out.points[idx][0] = x;
+                    out.points[idx][1] = y;
+                    out.points[idx][2] = z;
                 }
                 if (!std::getline(fs, line)) { if (err) *err = "Missing end of nodes block"; return false; }
                 line = trim(line);
@@ -111,7 +71,7 @@ namespace rvd {
                 continue;
             }
 
-            // Elements block start?
+            // Elements
             if (ieq(line, "$ELM") || ieq(line, "$Elements")) {
                 const bool legacy = ieq(line, "$ELM");
                 if (!std::getline(fs, line)) { if (err) *err = "Unexpected EOF after $ELM/$Elements"; return false; }
@@ -125,7 +85,6 @@ namespace rvd {
                     switch (type) {
                     case 2: return 3; // 3-node triangle
                     case 4: return 4; // 4-node tetrahedron
-                        // extend as needed
                     default: return -1;
                     }
                     };
@@ -135,16 +94,12 @@ namespace rvd {
                     line = trim(line); if (line.empty()) { --k; continue; }
                     std::istringstream es(line);
 
-                    // Parse *all* ints on the line (v1/v2 have different tag layouts)
                     std::vector<long long> tok; tok.reserve(16);
                     long long v;
                     while (es >> v) tok.push_back(v);
                     if (tok.size() < 3) { if (err) *err = "Bad element line: " + line; return false; }
 
-                    const long long elmNo = tok[0];
-                    const int       elmType = (int)tok[1];
-                    (void)elmNo;
-
+                    const int elmType = (int)tok[1];
                     const int K = needNodes(elmType);
                     if (K < 0) continue; // skip unsupported types
 
@@ -152,12 +107,9 @@ namespace rvd {
                         if (err) *err = "Element line too short for node list: " + line; return false;
                     }
 
-                    // Take the *last K* tokens as node ids; map to 0-based.
                     const int start = (int)tok.size() - K;
-                    std::array<uint32_t, 4> tet{};
-                    std::array<uint32_t, 3> tri{};
-
                     if (elmType == 4) {
+                        std::array<uint32_t, 4> tet{};
                         for (int i = 0;i < 4;++i) {
                             long long nid = tok[start + i];
                             auto it = id2idx.find(nid);
@@ -167,6 +119,7 @@ namespace rvd {
                         out.tets.push_back(tet);
                     }
                     else if (elmType == 2) {
+                        std::array<uint32_t, 3> tri{};
                         for (int i = 0;i < 3;++i) {
                             long long nid = tok[start + i];
                             auto it = id2idx.find(nid);
@@ -185,7 +138,7 @@ namespace rvd {
                 continue;
             }
 
-            // Otherwise: ignore unknown sections for v1
+            // ignore other sections
         }
 
         if (out.points.empty() || out.tets.empty()) {
